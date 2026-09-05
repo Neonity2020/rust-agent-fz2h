@@ -1,6 +1,8 @@
 mod common;
 mod list_directory;
 mod read_file;
+mod replace_text;
+mod run_command;
 mod search_text;
 
 use anyhow::{Result, bail};
@@ -15,11 +17,13 @@ trait Tool {
     fn execute(&self, root: &Path, args: &Value) -> Result<Value>;
 }
 
-fn registry() -> [&'static dyn Tool; 3] {
+fn registry() -> [&'static dyn Tool; 5] {
     [
         &list_directory::ListDirectory,
         &read_file::ReadFile,
         &search_text::SearchText,
+        &replace_text::ReplaceText,
+        &run_command::RunCommand,
     ]
 }
 
