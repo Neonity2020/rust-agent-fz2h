@@ -4,6 +4,7 @@ mod read_file;
 mod replace_text;
 mod run_command;
 mod search_text;
+mod write_file;
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -17,13 +18,14 @@ trait Tool {
     fn execute(&self, root: &Path, args: &Value) -> Result<Value>;
 }
 
-fn registry() -> [&'static dyn Tool; 5] {
+fn registry() -> [&'static dyn Tool; 6] {
     [
         &list_directory::ListDirectory,
         &read_file::ReadFile,
         &search_text::SearchText,
         &replace_text::ReplaceText,
         &run_command::RunCommand,
+        &write_file::WriteFile,
     ]
 }
 
