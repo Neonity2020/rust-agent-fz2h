@@ -151,7 +151,7 @@ cargo run -- "请列出当前目录，并搜索 src 中包含 load_api_key 的�
 | `read_file` | `path` | 最大 64 KiB 的 UTF-8 文件文本 |
 | `search_text` | `path`、`query` | 字面匹配的文件、行号和文本 |
 
-实现分为两个文件：`src/main.rs` 管理对话和模型协议，`src/tools.rs` 管理工具定义、参数检查及文件访问。没有新增 Rust 依赖。
+`src/main.rs` 管理对话和模型协议，`src/tools/` 管理工具。没有新增 Rust 依赖。
 
 本阶段每轮最多两次模型请求：第一次允许模型选择一批工具（最多 8 个，顺序执行），第二次禁用工具，让模型根据结果总结。不需要工具时只有一次请求。目录未知时，可以先询问目录，再在下一轮要求读取具体文件；自动连续探索放在阶段 4。
 
@@ -170,3 +170,23 @@ cargo build --examples
 cargo build
 python3 tests/terminal_input.py
 ```
+
+
+### 工具代码的阅读顺序
+
+```text
+src/tools/
+├── mod.rs             # Tool 接口、工具注册、统一定义与调用入口
+├── common.rs          # 共享路径边界检查和限量文本读取
+├── list_directory.rs  # 目录工具：描述、参数、执行逻辑
+├── read_file.rs       # 文件工具：描述、参数、执行逻辑
+└── search_text.rs     # 搜索工具：描述、参数、执行逻辑
+```
+
+先读 `mod.rs` 的 `Tool` trait：每个工具实现 `name`、`description`、`parameters`、`execute` 四个方法。再从最简单的 `read_file.rs` 开始看实现。
+
+Agent 只调用 `tools::definitions()` 和 `tools::execute(root, name, args)`。两者使用同一个 `registry()`，让提供给模型的工具与实际可执行的工具保持一致。`&dyn Tool` 表示通过统一接口调用不同工具，无需 Agent 判断具体工具类型。
+
+新增工具时，创建对应文件并实现 `Tool`，然后在 `mod.rs` 声明模块、加入注册列表并调整数组长度；Agent 无需修改。工具集合固定在编译期，不涉及动态插件加载。
+
+响应诊断：总结请求会明确要求根据现有工具结果回答。解析保留结束原因，兼容字符串和文本块正文；截断、总结阶段再次调用工具、空正文会分别报错。只检测推理内容是否存在，不打印推理原文，也不会将其替代最终答案。没有自动追加请求。

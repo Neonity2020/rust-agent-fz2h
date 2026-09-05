@@ -152,11 +152,56 @@ fn ask(client: &Client, api_key: &str, session: &str, messages: &mut Vec<Value>)
 }
 
 fn answer_text(message: &Value) -> Result<String> {
-    Ok(message["content"]
-        .as_str()
-        .filter(|text| !text.trim().is_empty())
-        .context("接口未返回非空回答文本")?
-        .to_owned())
+    let content = &message["content"];
+    let text = if let Some(text) = content.as_str() {
+        text.to_owned()
+    } else if let Some(parts) = content.as_array() {
+        parts
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    };
+    if text.trim().is_empty() {
+        bail!("接口未返回非空回答文本");
+    }
+    Ok(text)
+}
+
+fn parse_response(body: &Value, allow_tools: bool) -> Result<Value> {
+    let choice = &body["choices"][0];
+    let message = &choice["message"];
+    if !message.is_object() {
+        bail!("接口缺少 assistant 消息");
+    }
+    let reason = choice["finish_reason"].as_str().unwrap_or("unknown");
+    let calls = message["tool_calls"].as_array().map_or(0, Vec::len);
+    if reason == "length" {
+        bail!("模型输出被截断（finish_reason=length），请缩小本轮任务或读取范围");
+    }
+    if calls > 0 {
+        if allow_tools {
+            return Ok(message.clone());
+        }
+        bail!(
+            "模型在总结阶段仍返回 {calls} 个工具调用（finish_reason={reason}）；阶段 3 不继续执行工具，请缩小任务后重试"
+        );
+    }
+    if answer_text(message).is_err() {
+        let reasoning = ["reasoning_content", "reasoning"]
+            .iter()
+            .any(|key| message[*key].as_str().is_some_and(|text| !text.is_empty()));
+        let refusal = message["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty());
+        bail!(
+            "模型未返回最终回答（finish_reason={reason}, 含推理内容={reasoning}, 含拒绝信息={refusal}）。请重试或缩小任务；推理内容不会作为答案输出"
+        );
+    }
+    Ok(message.clone())
 }
 
 fn request(
@@ -167,13 +212,17 @@ fn request(
     allow_tools: bool,
 ) -> Result<Value> {
     eprintln!("正在请求 {MODEL}…");
+    let mut request_messages = messages.to_vec();
+    if !allow_tools {
+        request_messages.push(json!({"role":"user","content":"本轮工具执行已结束。请立即根据现有工具结果，用中文给出最终回答，不再调用工具。资料不足或工具失败时，请说明已确认的事实及缺少的信息。"}));
+    }
     let response = client
         .post(ENDPOINT)
         .bearer_auth(api_key)
         .header("x-opencode-session", session)
         .json(&json!({
             "model": MODEL,
-            "messages": messages,
+            "messages": request_messages,
             "tools": tools::definitions(),
             "tool_choice": if allow_tools { "auto" } else { "none" },
             "stream": false
@@ -192,11 +241,7 @@ fn request(
         bail!("OpenCode Go 返回 HTTP {status}：{hint}");
     }
     let body: Value = response.json().context("接口返回的内容不是有效 JSON")?;
-    let message = &body["choices"][0]["message"];
-    if !message.is_object() {
-        bail!("接口缺少 assistant 消息");
-    }
-    Ok(message.clone())
+    parse_response(&body, allow_tools)
 }
 
 fn load_api_key() -> Result<String> {
@@ -219,4 +264,35 @@ fn load_api_key() -> Result<String> {
         .filter(|key| !key.is_empty())
         .context("auth.json 中的 Go API Key 缺失或为空")?;
     Ok(key.to_owned())
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    #[test]
+    fn text_and_tool_responses() -> Result<()> {
+        for content in [json!("回答"), json!([{"type":"text","text":"回答"}])] {
+            let response =
+                json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]});
+            assert_eq!(answer_text(&parse_response(&response, false)?)?, "回答");
+        }
+        let response = json!({"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{"id":"1"}]}}]});
+        assert!(parse_response(&response, true).is_ok());
+        assert!(
+            parse_response(&response, false)
+                .unwrap_err()
+                .to_string()
+                .contains("仍返回")
+        );
+        Ok(())
+    }
+    #[test]
+    fn empty_and_truncated_responses_are_diagnostic() {
+        for reason in ["stop", "length", "content_filter"] {
+            let response = json!({"choices":[{"finish_reason":reason,"message":{"content":null,"reasoning_content":"private reasoning"}}]});
+            let error = parse_response(&response, false).unwrap_err().to_string();
+            assert!(error.contains(reason));
+            assert!(!error.contains("private reasoning"));
+        }
+    }
 }
