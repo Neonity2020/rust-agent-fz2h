@@ -43,7 +43,10 @@ def check(text, keys):
         reaped = False
         try:
             fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 20, 0, 0))
-            read_for(0.5)
+            deadline = time.monotonic() + 10
+            while "你> ".encode() not in output and time.monotonic() < deadline:
+                read_for(0.1)
+            assert "你> ".encode() in output, "Editor did not become ready"
             os.write(fd, text.encode())
             read_for(0.2)
             os.write(fd, keys)
