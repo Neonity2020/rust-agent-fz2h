@@ -21,22 +21,20 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    let prompt = env::args().skip(1).collect::<Vec<_>>().join(" ");
+    let args: Vec<String> = env::args().skip(1).collect();
+    let prompt = args.join(" ");
     if prompt == "--help" || prompt == "-h" {
-        println!("用法：cargo run -- \"你的问题\"\n自动读取本机 OpenCode auth.json 中的 Go 凭据。");
+        println!(
+            "多轮对话：cargo run\n单次问答：cargo run -- \"你的问题\"\n阶段 1：cargo run --example stage1 -- \"你的问题\"\n对话命令：/clear 清空会话，/exit 退出\n自动读取本机 OpenCode auth.json 中的 Go 凭据。"
+        );
         return Ok(());
     }
-    if prompt.trim().is_empty() {
+    if !args.is_empty() && prompt.trim().is_empty() {
         bail!("请输入问题，例如：cargo run -- \"解释 Rust 的所有权\"");
     }
     let api_key = load_api_key()?;
 
-    // 第一阶段每次启动只有一次请求，因此每次生成一个会话标识。
-    let session = format!(
-        "rust-agent-{}-{}",
-        std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
-    );
+    let session = new_session()?;
     let client = Client::builder()
         .user_agent(concat!("rust-agent/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
@@ -44,6 +42,74 @@ fn run() -> Result<()> {
         .build()
         .context("创建 HTTP 客户端失败")?;
 
+    if args.is_empty() {
+        chat(&client, &api_key, session)
+    } else {
+        let messages = vec![json!({"role": "user", "content": prompt})];
+        println!("{}", ask(&client, &api_key, &session, &messages)?);
+        Ok(())
+    }
+}
+
+fn new_session() -> Result<String> {
+    Ok(format!(
+        "rust-agent-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+    ))
+}
+
+fn initial_messages() -> Vec<Value> {
+    vec![json!({
+        "role": "system",
+        "content": "你是一个 Rust 编程助手。请用中文清晰简洁地回答。你目前只能对话，不能读取文件、修改代码或执行命令。"
+    })]
+}
+
+fn chat(client: &Client, api_key: &str, mut session: String) -> Result<()> {
+    use rustyline::{DefaultEditor, error::ReadlineError};
+
+    let mut messages = initial_messages();
+    let mut editor = DefaultEditor::new().context("初始化行编辑器失败")?;
+    eprintln!("Omen Alpha 多轮对话。/clear 清空会话，/exit 退出；Ctrl-D 结束输入。");
+    loop {
+        let input = match editor.readline("你> ") {
+            Ok(input) => input,
+            Err(ReadlineError::Interrupted) => {
+                eprintln!("已取消当前输入。");
+                continue;
+            }
+            Err(ReadlineError::Eof) => return Ok(()),
+            Err(error) => return Err(error).context("读取输入失败"),
+        };
+        let prompt = input.trim();
+        match prompt {
+            "" => continue,
+            "/exit" => return Ok(()),
+            "/clear" => {
+                messages = initial_messages();
+                session = new_session()?;
+                eprintln!("会话已清空。");
+                continue;
+            }
+            _ => {}
+        }
+        messages.push(json!({"role": "user", "content": prompt}));
+        match ask(client, api_key, &session, &messages) {
+            Ok(answer) => {
+                println!("助手> {answer}");
+                messages.push(json!({"role": "assistant", "content": answer}));
+            }
+            Err(error) => {
+                // 只保留完整问答，失败的输入不进入下一轮上下文。
+                messages.pop();
+                eprintln!("错误：{error:#}\n本轮未加入历史，可以重新输入。");
+            }
+        }
+    }
+}
+
+fn ask(client: &Client, api_key: &str, session: &str, messages: &[Value]) -> Result<String> {
     eprintln!("正在请求 {MODEL}…");
     let response = client
         .post(ENDPOINT)
@@ -51,7 +117,7 @@ fn run() -> Result<()> {
         .header("x-opencode-session", session)
         .json(&json!({
             "model": MODEL,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": false
         }))
         .send()
@@ -72,8 +138,7 @@ fn run() -> Result<()> {
         .as_str()
         .filter(|text| !text.trim().is_empty())
         .context("接口未返回非空的 choices[0].message.content 文本")?;
-    println!("{answer}");
-    Ok(())
+    Ok(answer.to_owned())
 }
 
 fn load_api_key() -> Result<String> {
