@@ -1,5 +1,5 @@
 use super::{Tool, common::confirm};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::{
     io::Read,
@@ -48,9 +48,19 @@ fn run(root: &Path, command: &str, timeout: Duration) -> Result<Value> {
     let err = thread::spawn(move || capture(stderr));
     let start = Instant::now();
     let mut timed_out = false;
+    let mut interrupted = false;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
+        }
+        if crate::tui::cancelled() {
+            interrupted = true;
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            break child.wait()?;
         }
         if start.elapsed() >= timeout {
             timed_out = true;
@@ -74,6 +84,9 @@ fn run(root: &Path, command: &str, timeout: Duration) -> Result<Value> {
     let (stderr, err_truncated) = err
         .join()
         .map_err(|_| anyhow::anyhow!("stderr 读取线程失败"))??;
+    if interrupted {
+        bail!("已中断，命令进程组已被终止");
+    }
     Ok(
         json!({"exit_code":status.code(),"success":status.success() && !timed_out,"timed_out":timed_out,"stdout":stdout,"stderr":stderr,"stdout_truncated":out_truncated,"stderr_truncated":err_truncated}),
     )

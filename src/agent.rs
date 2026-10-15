@@ -1,11 +1,12 @@
 use crate::{
     model::{answer_text, request},
     tools,
+    tui::{self, Ui},
 };
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
-use std::env;
+use std::{env, time::Instant};
 
 pub(crate) fn initial_messages() -> Vec<Value> {
     vec![json!({
@@ -20,13 +21,15 @@ pub(crate) fn ask(
     session: &str,
     messages: &mut Vec<Value>,
     max_steps: usize,
+    ui: &Ui,
 ) -> Result<String> {
     let root = env::current_dir()?.canonicalize()?;
     run_loop(
         &root,
         messages,
         max_steps,
-        |history, allow_tools| request(client, api_key, session, history, allow_tools),
+        ui,
+        |history, allow_tools| request(client, api_key, session, history, allow_tools, ui),
         |history| {
             crate::session::save(
                 &root.join(".rust-agent/checkpoint.json"),
@@ -47,13 +50,14 @@ fn run_steps(
     messages: &mut Vec<Value>,
     next: impl FnMut(&[Value], bool) -> Result<Value>,
 ) -> Result<String> {
-    run_loop(root, messages, MAX_STEPS, next, |_| Ok(()))
+    run_loop(root, messages, MAX_STEPS, &Ui::quiet(), next, |_| Ok(()))
 }
 
 fn run_loop(
     root: &std::path::Path,
     messages: &mut Vec<Value>,
     max_steps: usize,
+    ui: &Ui,
     mut next: impl FnMut(&[Value], bool) -> Result<Value>,
     mut checkpoint: impl FnMut(&[Value]) -> Result<()>,
 ) -> Result<String> {
@@ -63,11 +67,8 @@ fn run_loop(
     checkpoint(messages)?;
     for step in 1..=max_steps {
         let allow_tools = step < max_steps;
-        eprintln!("Agent 步骤 {step}/{max_steps}");
-        if !allow_tools {
-            eprintln!("达到工具探索上限，正在总结已有结果。");
-        }
-        compact_history(messages)?;
+        ui.step(step, max_steps, !allow_tools);
+        compact_history(messages, ui)?;
         let first = next(messages, allow_tools)?;
         let Some(calls) = first["tool_calls"]
             .as_array()
@@ -106,15 +107,18 @@ fn run_loop(
             let name = call["function"]["name"]
                 .as_str()
                 .context("工具调用缺少名称")?;
-            eprintln!("调用工具：{name}");
-            let result = (|| -> Result<Value> {
-                let args: Value = serde_json::from_str(
-                    call["function"]["arguments"]
-                        .as_str()
-                        .context("工具参数缺失")?,
-                )?;
-                tools::execute(root, name, &args)
-            })();
+            let args: Result<Value, serde_json::Error> = serde_json::from_str(
+                call["function"]["arguments"]
+                    .as_str()
+                    .context("工具参数缺失")?,
+            );
+            ui.tool_call(name, args.as_ref().unwrap_or(&Value::Null));
+            let started = Instant::now();
+            let result = match args {
+                Ok(args) => tools::execute(root, name, &args),
+                Err(error) => Err(error.into()),
+            };
+            ui.tool_result(name, &result, started.elapsed());
             let content = match result {
                 Ok(value) => value,
                 Err(error) => json!({"error":format!("{error:#}")}),
@@ -122,13 +126,16 @@ fn run_loop(
             messages[start + index] =
                 json!({"role":"tool","tool_call_id":id,"content":content.to_string()});
             checkpoint(messages)?;
+            if tui::cancelled() {
+                bail!("已取消工具执行，后续调用未运行");
+            }
         }
     }
     bail!("达到步数上限，未获得最终回答")
 }
 
 // 仅缩短较早工具结果，保留调用配对、用户目标和最近结果；不静默删除用户指令。
-fn compact_history(messages: &mut [Value]) -> Result<()> {
+fn compact_history(messages: &mut [Value], ui: &Ui) -> Result<()> {
     if serde_json::to_vec(messages)?.len() <= 300 * 1024 {
         return Ok(());
     }
@@ -146,7 +153,7 @@ fn compact_history(messages: &mut [Value]) -> Result<()> {
         }
     }
     if reduced > 0 {
-        eprintln!("已缩短 {reduced} 条早期工具输出以控制上下文。");
+        ui.note(&format!("已缩短 {reduced} 条早期工具输出以控制上下文。"));
     }
     Ok(())
 }
@@ -168,6 +175,7 @@ mod tests {
             &root,
             &mut messages,
             3,
+            &Ui::quiet(),
             |_, _| {
                 requests += 1;
                 if requests == 1 {
@@ -211,7 +219,7 @@ mod tests {
             );
         }
         let original = messages.clone();
-        compact_history(&mut messages)?;
+        compact_history(&mut messages, &Ui::quiet())?;
         assert_eq!(messages.len(), original.len());
         assert_eq!(messages[1], original[1]);
         assert!(serde_json::to_vec(&messages)?.len() < serde_json::to_vec(&original)?.len());
@@ -222,6 +230,43 @@ mod tests {
     }
     fn tool_call(id: usize, name: &str, args: Value) -> Value {
         json!({"role":"assistant","content":null,"tool_calls":[{"id":id.to_string(),"type":"function","function":{"name":name,"arguments":args.to_string()}}]})
+    }
+
+    #[test]
+    fn tool_activity_shows_arguments_outcome_and_timing() -> Result<()> {
+        let root = env::temp_dir().join(format!("agent-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&root)?;
+        let root = root.canonicalize()?;
+        std::fs::write(root.join("note.txt"), "第一行\n")?;
+        let mut messages = vec![json!({"role": "user", "content": "读一下"})];
+        let mut step = 0;
+        let (ui, buffer) = Ui::capture();
+        let answer = run_loop(
+            &root,
+            &mut messages,
+            3,
+            &ui,
+            |_, _| {
+                step += 1;
+                match step {
+                    1 => Ok(tool_call(1, "read_file", json!({"path": "note.txt"}))),
+                    2 => Ok(tool_call(2, "list_directory", json!({"path": "missing"}))),
+                    _ => Ok(json!({"content": "完成"})),
+                }
+            },
+            |_| Ok(()),
+        )?;
+        assert_eq!(answer, "完成");
+        let out = buffer.borrow();
+        assert!(out.contains("步骤 1/3"), "{out}");
+        // 参数要能看到，否则用户不知道 agent 到底动了什么。
+        assert!(out.contains("read_file") && out.contains("path=note.txt"), "{out}");
+        assert!(out.contains("1 行"), "{out}");
+        assert!(out.contains("ms") || out.contains('s'), "要有耗时：{out}");
+        assert!(out.contains("✗"), "失败的工具要有明确标记：{out}");
+        assert!(out.contains("步骤 3/3") && out.contains("收尾总结"), "{out}");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn loop_recovers_from_tool_error_then_reads_file() -> Result<()> {

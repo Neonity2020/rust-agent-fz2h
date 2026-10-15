@@ -6,6 +6,12 @@ use std::{
 };
 pub(super) const MAX_BYTES: u64 = 64 * 1024;
 
+thread_local! {
+    // 确认框复用同一个编辑器，保留上次的编辑状态而不是每次重建。
+    static CONFIRM_EDITOR: std::cell::RefCell<Option<rustyline::DefaultEditor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub(super) fn confirm(preview: &str) -> Result<()> {
     use std::io::{self, IsTerminal};
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
@@ -23,10 +29,17 @@ pub(super) fn confirm(preview: &str) -> Result<()> {
         })
         .collect();
     eprintln!("{safe}");
-    let mut editor = rustyline::DefaultEditor::new()?;
-    match editor.readline("允许本次操作？输入 yes 确认，其他输入取消> ") {
-        Ok(answer) if answer.trim() == "yes" => Ok(()),
-        _ => bail!("用户取消，本次操作未执行；不要重复请求同一操作"),
+    let answer = CONFIRM_EDITOR.with(|slot| -> Result<String, rustyline::error::ReadlineError> {
+        let mut slot = slot.borrow_mut();
+        let editor = slot.get_or_insert_with(|| rustyline::DefaultEditor::new().expect("初始化行编辑器失败"));
+        let answer = editor.readline("允许本次操作？输入 yes 确认，其他输入取消> ")?;
+        let _ = editor.add_history_entry(&answer);
+        Ok(answer)
+    })?;
+    if answer.trim() == "yes" {
+        Ok(())
+    } else {
+        bail!("用户取消，本次操作未执行；不要重复请求同一操作")
     }
 }
 pub(super) fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
