@@ -3,6 +3,13 @@ use serde_json::Value;
 use std::env;
 
 pub(crate) fn load_api_key() -> Result<String> {
+    if let Some(key) = env::var("RUST_AGENT_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(key);
+    }
     let data_dir = match env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
         Some(path) => std::path::PathBuf::from(path),
         None => std::path::PathBuf::from(env::var_os("HOME").context("无法确定用户主目录")?)

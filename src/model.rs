@@ -6,17 +6,37 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, Response};
 use serde_json::{Value, json};
 use std::{
+    env,
     io::{BufRead, BufReader, Read},
     sync::mpsc,
     time::{Duration, Instant},
 };
 
-const ENDPOINT: &str = "https://opencode.ai/zen/go/v1/chat/completions";
+const DEFAULT_ENDPOINT: &str = "https://opencode.ai/zen/go/v1/chat/completions";
+const DEFAULT_MODEL: &str = "omen-alpha";
 const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const TICK: Duration = Duration::from_millis(120);
 
-pub(crate) const MODEL: &str = "omen-alpha";
+// 默认走 OpenCode Go；环境变量可切换到其他兼容接口，便于接入本地或其他服务。
+fn env_string(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn endpoint() -> String {
+    env_string("RUST_AGENT_ENDPOINT").unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned())
+}
+
+pub(crate) fn model() -> String {
+    env_string("RUST_AGENT_MODEL").unwrap_or_else(|| DEFAULT_MODEL.to_owned())
+}
+
+pub(crate) fn custom_endpoint() -> bool {
+    env_string("RUST_AGENT_ENDPOINT").is_some()
+}
 
 pub(crate) fn create_client() -> Result<Client> {
     Client::builder()
@@ -102,7 +122,10 @@ struct PartialCall {
 
 impl StreamState {
     fn push(&mut self, chunk: &Value) {
-        let Some(choice) = chunk["choices"].as_array().and_then(|choices| choices.first()) else {
+        let Some(choice) = chunk["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+        else {
             return;
         };
         if let Some(reason) = choice["finish_reason"].as_str()
@@ -159,7 +182,11 @@ impl StreamState {
     }
 
     fn finish(self, allow_tools: bool) -> Result<Value> {
-        let reason = if self.reason.is_empty() { "stop" } else { self.reason.as_str() };
+        let reason = if self.reason.is_empty() {
+            "stop"
+        } else {
+            self.reason.as_str()
+        };
         finish_message(&self.message(), reason, allow_tools)
     }
 }
@@ -170,7 +197,7 @@ fn payload(messages: &[Value], allow_tools: bool, stream: bool) -> Result<Vec<u8
         request_messages.push(json!({"role":"user","content":"本轮工具执行已结束。请立即根据现有工具结果，用中文给出最终回答，不再调用工具。资料不足或工具失败时，请说明已确认的事实及缺少的信息。"}));
     }
     let bytes = serde_json::to_vec(&json!({
-        "model": MODEL,
+        "model": model(),
         "messages": request_messages,
         "tools": tools::definitions(),
         "tool_choice": if allow_tools { "auto" } else { "none" },
@@ -182,7 +209,13 @@ fn payload(messages: &[Value], allow_tools: bool, stream: bool) -> Result<Vec<u8
     Ok(bytes)
 }
 
-fn post(client: &Client, endpoint: &str, body: &[u8], api_key: &str, session: &str) -> Result<Response> {
+fn post(
+    client: &Client,
+    endpoint: &str,
+    body: &[u8],
+    api_key: &str,
+    session: &str,
+) -> Result<Response> {
     let response = client
         .post(endpoint)
         .bearer_auth(api_key)
@@ -210,7 +243,11 @@ enum Event {
 }
 
 /// 读取 SSE 分片并累加。正文实时下发，工具参数在收到 [DONE] 后才算完整。
-fn consume_stream(response: Response, allow_tools: bool, tx: &mpsc::Sender<Event>) -> Result<Value> {
+fn consume_stream(
+    response: Response,
+    allow_tools: bool,
+    tx: &mpsc::Sender<Event>,
+) -> Result<Value> {
     let mut reader = BufReader::new(response.take((MAX_RESPONSE_BYTES + 1) as u64));
     let mut state = StreamState::default();
     let mut line = String::new();
@@ -236,8 +273,7 @@ fn consume_stream(response: Response, allow_tools: bool, tx: &mpsc::Sender<Event
         }
         state.push(&chunk);
         if state.text.len() > sent {
-            tx.send(Event::Delta(state.text[sent..].to_owned()))
-                .ok();
+            tx.send(Event::Delta(state.text[sent..].to_owned())).ok();
             sent = state.text.len();
         }
     }
@@ -256,10 +292,16 @@ fn stream_request(
 ) -> Result<Value> {
     let (tx, rx) = mpsc::channel::<Event>();
     let worker = client.clone();
-    let (endpoint, body, api_key, session) = (endpoint.to_owned(), body.to_vec(), api_key.to_owned(), session.to_owned());
+    let (endpoint, body, api_key, session) = (
+        endpoint.to_owned(),
+        body.to_vec(),
+        api_key.to_owned(),
+        session.to_owned(),
+    );
     let sender = tx.clone();
     std::thread::spawn(move || {
-        let result = post(&worker, &endpoint, &body, &api_key, &session).and_then(|response| consume_stream(response, allow_tools, &sender));
+        let result = post(&worker, &endpoint, &body, &api_key, &session)
+            .and_then(|response| consume_stream(response, allow_tools, &sender));
         let _ = tx.send(Event::Done(result));
     });
 
@@ -276,7 +318,10 @@ fn stream_request(
                 return result;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                ui.tick(&format!("等待模型响应 · {:.0}s", started.elapsed().as_secs_f64()));
+                ui.tick(&format!(
+                    "等待模型响应 · {:.0}s",
+                    started.elapsed().as_secs_f64()
+                ));
                 if tui::cancelled() {
                     ui.busy_stop();
                     ui.stream_end(true);
@@ -301,7 +346,7 @@ fn blocking_request(
     ui: &Ui,
     allow_tools: bool,
 ) -> Result<Value> {
-    ui.note(&format!("正在请求 {MODEL}…"));
+    ui.note(&format!("正在请求 {}…", model()));
     let started = Instant::now();
     let response = post(client, endpoint, body, api_key, session)?;
     let mut bytes = Vec::new();
@@ -312,7 +357,10 @@ fn blocking_request(
     if bytes.len() > MAX_RESPONSE_BYTES {
         bail!("模型响应超过 2 MiB，停止读取");
     }
-    ui.note(&format!("模型请求完成，用时 {:.1} 秒。", started.elapsed().as_secs_f64()));
+    ui.note(&format!(
+        "模型请求完成，用时 {:.1} 秒。",
+        started.elapsed().as_secs_f64()
+    ));
     let body: Value = serde_json::from_slice(&bytes).context("接口返回的内容不是有效 JSON")?;
     parse_response(&body, allow_tools)
 }
@@ -328,10 +376,11 @@ pub(crate) fn request(
     tui::reset_cancel();
     let interactive = ui.is_interactive();
     let body = payload(messages, allow_tools, interactive)?;
+    let endpoint = endpoint();
     let result = if interactive {
-        stream_request(client, ENDPOINT, &body, api_key, session, ui, allow_tools)
+        stream_request(client, &endpoint, &body, api_key, session, ui, allow_tools)
     } else {
-        blocking_request(client, ENDPOINT, &body, api_key, session, ui, allow_tools)
+        blocking_request(client, &endpoint, &body, api_key, session, ui, allow_tools)
     };
     match &result {
         Ok(_) => ui.stream_end(false),
@@ -345,10 +394,7 @@ pub(crate) fn request(
 mod tests {
     use super::*;
     use crate::tui::Ui;
-    use std::{
-        io::Write as _,
-        net::TcpListener,
-    };
+    use std::{io::Write as _, net::TcpListener};
 
     /// 起一个只回固定响应的本地服务；prefix 为 Some 时只发前若干字节就挂住，
     /// 用来模拟"连接还在但迟迟不结束"的响应。
@@ -401,7 +447,10 @@ mod tests {
     }
 
     fn sse(chunks: &[&str]) -> String {
-        chunks.iter().map(|chunk| format!("data: {chunk}\n\n")).collect()
+        chunks
+            .iter()
+            .map(|chunk| format!("data: {chunk}\n\n"))
+            .collect()
     }
 
     #[test]
@@ -422,7 +471,11 @@ mod tests {
         assert_eq!(message["content"], "正在流式输出");
         assert_eq!(message["role"], "assistant");
         // 正文在流结束前就已经写到终端上，而不是等整段收完。
-        assert!(buffer.borrow().contains("正在流式输出"), "{}", buffer.borrow());
+        assert!(
+            buffer.borrow().contains("正在流式输出"),
+            "{}",
+            buffer.borrow()
+        );
         Ok(())
     }
 
@@ -445,7 +498,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["id"], "call_1");
         assert_eq!(calls[0]["function"]["name"], "read_file");
-        assert_eq!(calls[0]["function"]["arguments"], "{\"path\":\"src/main.rs\"}");
+        assert_eq!(
+            calls[0]["function"]["arguments"],
+            "{\"path\":\"src/main.rs\"}"
+        );
         Ok(())
     }
 
@@ -467,7 +523,11 @@ mod tests {
         stopper.join().unwrap();
         tui::reset_cancel();
         assert!(error.to_string().contains("取消"), "{error}");
-        assert!(buffer.borrow().contains("开头"), "已收到的内容要保留：{}", buffer.borrow());
+        assert!(
+            buffer.borrow().contains("开头"),
+            "已收到的内容要保留：{}",
+            buffer.borrow()
+        );
         Ok(())
     }
 
@@ -552,8 +612,14 @@ mod tests {
         let messages = vec![json!({"role": "user", "content": "你好"})];
         let streamed = payload(&messages, true, true)?;
         let plain = payload(&messages, true, false)?;
-        assert_eq!(serde_json::from_slice::<Value>(&streamed)?["stream"], json!(true));
-        assert_eq!(serde_json::from_slice::<Value>(&plain)?["stream"], json!(false));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&streamed)?["stream"],
+            json!(true)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&plain)?["stream"],
+            json!(false)
+        );
         let forced = payload(&messages, false, true)?;
         let forced: Value = serde_json::from_slice(&forced)?;
         assert_eq!(forced["tool_choice"], "none");

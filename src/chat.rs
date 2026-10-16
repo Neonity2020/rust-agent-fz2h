@@ -1,7 +1,6 @@
 use crate::{
     agent::{ask, initial_messages},
-    model::MODEL,
-    session,
+    model, session,
     tui::{self, Ui, command_help, format_bytes, interrupt_hint, pad, shorten_home},
 };
 use anyhow::{Context, Result};
@@ -9,8 +8,7 @@ use reqwest::blocking::Client;
 use rustyline::DefaultEditor;
 use serde_json::{Value, json};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -51,7 +49,11 @@ fn load_history(editor: &mut DefaultEditor, path: &Path, ui: &Ui) {
     let Ok(text) = fs::read_to_string(path) else {
         return;
     };
-    let lines: Vec<String> = text.lines().filter(|line| !line.trim().is_empty()).map(str::to_owned).collect();
+    let lines: Vec<String> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
     let keep = lines.len().saturating_sub(MAX_HISTORY);
     for line in &lines {
         if let Err(error) = editor.add_history_entry(line) {
@@ -86,8 +88,14 @@ fn append_history(path: &Path, line: &str) {
 fn banner(ui: &Ui, root: &Path, max_steps: usize) {
     let version = env!("CARGO_PKG_VERSION");
     let directory = shorten_home(root);
-    let commands = format!("输入 /help 查看命令，每轮最多 {max_steps} 步。{}", interrupt_hint());
-    ui.note(&format!("rust-agent {version} · {MODEL} · 工作目录 {directory}"));
+    let commands = format!(
+        "输入 /help 查看命令，每轮最多 {max_steps} 步。{}",
+        interrupt_hint()
+    );
+    ui.note(&format!(
+        "rust-agent {version} · {} · 工作目录 {directory}",
+        model::model()
+    ));
     ui.note(&commands);
 }
 
@@ -105,8 +113,13 @@ fn status_report(
         .flatten()
         .count();
     let row = |label: &str, value: String| format!("  {}  {}", pad(label, 8), value);
+    let provider = if model::custom_endpoint() {
+        "自定义端点"
+    } else {
+        "OpenCode Go"
+    };
     Ok(vec![
-        row("模型", format!("{MODEL}（OpenCode Go）")),
+        row("模型", format!("{}（{provider}）", model::model())),
         row("工作目录", shorten_home(root)),
         row("会话", session.to_owned()),
         row("存档", shorten_home(session_path)),
@@ -137,7 +150,11 @@ pub(crate) fn run(
     let checkpoint_path = state.join("checkpoint.json");
     let history = history_path(&state);
     if resume {
-        let source = if checkpoint_path.exists() { &checkpoint_path } else { &session_path };
+        let source = if checkpoint_path.exists() {
+            &checkpoint_path
+        } else {
+            &session_path
+        };
         match session::load(source, &root) {
             Ok((id, mut history_messages)) => {
                 history_messages[0] = initial_messages().remove(0);
@@ -199,7 +216,11 @@ pub(crate) fn run(
                 Err(error) => ui.error(&format!("保存失败：{error:#}")),
             },
             "/load" | "/recover" => {
-                let path = if prompt == "/recover" { &checkpoint_path } else { &session_path };
+                let path = if prompt == "/recover" {
+                    &checkpoint_path
+                } else {
+                    &session_path
+                };
                 match session::load(path, &root) {
                     Ok((id, mut restored)) => {
                         restored[0] = initial_messages().remove(0);
@@ -211,16 +232,18 @@ pub(crate) fn run(
                 }
                 continue;
             }
-            "/status" => match status_report(&messages, &session, &root, max_steps, &session_path) {
-                Ok(lines) => {
-                    ui.note("");
-                    for line in lines {
-                        ui.note(&line);
+            "/status" => {
+                match status_report(&messages, &session, &root, max_steps, &session_path) {
+                    Ok(lines) => {
+                        ui.note("");
+                        for line in lines {
+                            ui.note(&line);
+                        }
+                        ui.note("");
                     }
-                    ui.note("");
+                    Err(error) => ui.error(&format!("状态读取失败：{error:#}")),
                 }
-                Err(error) => ui.error(&format!("状态读取失败：{error:#}")),
-            },
+            }
             "/clear" => {
                 messages = initial_messages();
                 session = new_session()?;
