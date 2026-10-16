@@ -260,11 +260,17 @@ mod tests {
         let out = buffer.borrow();
         assert!(out.contains("步骤 1/3"), "{out}");
         // 参数要能看到，否则用户不知道 agent 到底动了什么。
-        assert!(out.contains("read_file") && out.contains("path=note.txt"), "{out}");
+        assert!(
+            out.contains("read_file") && out.contains("path=note.txt"),
+            "{out}"
+        );
         assert!(out.contains("1 行"), "{out}");
         assert!(out.contains("ms") || out.contains('s'), "要有耗时：{out}");
         assert!(out.contains("✗"), "失败的工具要有明确标记：{out}");
-        assert!(out.contains("步骤 3/3") && out.contains("收尾总结"), "{out}");
+        assert!(
+            out.contains("步骤 3/3") && out.contains("收尾总结"),
+            "{out}"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

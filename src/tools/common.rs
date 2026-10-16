@@ -29,13 +29,16 @@ pub(super) fn confirm(preview: &str) -> Result<()> {
         })
         .collect();
     eprintln!("{safe}");
-    let answer = CONFIRM_EDITOR.with(|slot| -> Result<String, rustyline::error::ReadlineError> {
-        let mut slot = slot.borrow_mut();
-        let editor = slot.get_or_insert_with(|| rustyline::DefaultEditor::new().expect("初始化行编辑器失败"));
-        let answer = editor.readline("允许本次操作？输入 yes 确认，其他输入取消> ")?;
-        let _ = editor.add_history_entry(&answer);
-        Ok(answer)
-    })?;
+    let answer =
+        CONFIRM_EDITOR.with(|slot| -> Result<String, rustyline::error::ReadlineError> {
+            let mut slot = slot.borrow_mut();
+            let editor = slot.get_or_insert_with(|| {
+                rustyline::DefaultEditor::new().expect("初始化行编辑器失败")
+            });
+            let answer = editor.readline("允许本次操作？输入 yes 确认，其他输入取消> ")?;
+            let _ = editor.add_history_entry(&answer);
+            Ok(answer)
+        })?;
     if answer.trim() == "yes" {
         Ok(())
     } else {

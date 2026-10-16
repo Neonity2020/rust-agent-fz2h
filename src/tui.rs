@@ -126,7 +126,10 @@ pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
             let width = char_columns(c);
             if used + width > columns && !line.is_empty() {
                 let (head, tail) = match split.take() {
-                    Some(at) => (line[..at].trim_end().to_owned(), line[at..].trim_start().to_owned()),
+                    Some(at) => (
+                        line[..at].trim_end().to_owned(),
+                        line[at..].trim_start().to_owned(),
+                    ),
                     None => (std::mem::take(&mut line), String::new()),
                 };
                 out.push(format!("{indent}{head}"));
@@ -159,10 +162,12 @@ pub(crate) fn pad(text: &str, columns: usize) -> String {
 pub(crate) fn shorten_home(path: &Path) -> String {
     let text = path.display().to_string();
     match env::var_os("HOME") {
-        Some(home) if !home.is_empty() => match text.strip_prefix(home.to_string_lossy().as_ref()) {
-            Some(rest) => format!("~{rest}"),
-            None => text,
-        },
+        Some(home) if !home.is_empty() => {
+            match text.strip_prefix(home.to_string_lossy().as_ref()) {
+                Some(rest) => format!("~{rest}"),
+                None => text,
+            }
+        }
         _ => text,
     }
 }
@@ -211,7 +216,11 @@ fn format_args(args: &Value) -> String {
 }
 
 fn count_lines(text: &str) -> usize {
-    if text.is_empty() { 0 } else { text.lines().count() }
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
 }
 
 /// 工具结果摘要：优先给出能判断成败的信息。
@@ -284,7 +293,10 @@ fn tail_preview(name: &str, value: &Value) -> Vec<String> {
     if text.is_empty() {
         return Vec::new();
     }
-    let mut lines: Vec<String> = text.lines().map(|line| line.trim_end().to_owned()).collect();
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .collect();
     if lines.len() > PREVIEW_LINES {
         let hidden = lines.len() - PREVIEW_LINES;
         lines.drain(..hidden);
@@ -462,7 +474,11 @@ impl Ui {
     pub fn step(&self, step: usize, max: usize, summarizing: bool) {
         let label = format!(
             "步骤 {step}/{max}{}",
-            if summarizing { " · 收尾总结，不再调用工具" } else { "" }
+            if summarizing {
+                " · 收尾总结，不再调用工具"
+            } else {
+                ""
+            }
         );
         self.status(&self.paint("2;37", &label));
     }
@@ -475,20 +491,31 @@ impl Ui {
         if !args.is_empty() {
             body = format!(
                 " {}",
-                self.paint("2", &truncate(&args, self.columns().saturating_sub(name.len() + 4)))
+                self.paint(
+                    "2",
+                    &truncate(&args, self.columns().saturating_sub(name.len() + 4))
+                )
             );
         }
         self.status(&format!("  {mark} {name}{body}"));
     }
 
-    pub fn tool_result(&self, name: &str, result: &std::result::Result<Value, anyhow::Error>, elapsed: Duration) {
+    pub fn tool_result(
+        &self,
+        name: &str,
+        result: &std::result::Result<Value, anyhow::Error>,
+        elapsed: Duration,
+    ) {
         self.clear_busy();
         match result {
             Ok(value) => {
                 self.status(&format!(
                     "    {} {} · {}",
                     self.paint("32", "✓"),
-                    self.paint("2", &truncate(&summarize(name, value), self.columns().saturating_sub(12))),
+                    self.paint(
+                        "2",
+                        &truncate(&summarize(name, value), self.columns().saturating_sub(12))
+                    ),
                     self.paint("2", &format_elapsed(elapsed))
                 ));
                 for line in tail_preview(name, value) {
@@ -639,7 +666,10 @@ mod tests {
             "3 行 · 5 B"
         );
         assert_eq!(
-            summarize("write_file", &serde_json::json!({"changed": true, "created": true, "path": "a.rs"})),
+            summarize(
+                "write_file",
+                &serde_json::json!({"changed": true, "created": true, "path": "a.rs"})
+            ),
             "新建 a.rs"
         );
         assert_eq!(
@@ -647,7 +677,10 @@ mod tests {
             "内容未变化，未写入"
         );
         assert_eq!(
-            summarize("search_text", &serde_json::json!({"matches": [{"line": 1}], "truncated": true, "skipped": 3})),
+            summarize(
+                "search_text",
+                &serde_json::json!({"matches": [{"line": 1}], "truncated": true, "skipped": 3})
+            ),
             "1 处匹配（已达预算上限），跳过 3 个文件"
         );
         let run = summarize(
@@ -660,11 +693,18 @@ mod tests {
     #[test]
     fn run_command_preview_shows_output_tail() {
         let value = serde_json::json!({"stdout": "", "stderr": "error[E0432]: 未解析的导入\n"});
-        assert_eq!(tail_preview("run_command", &value), vec!["error[E0432]: 未解析的导入"]);
+        assert_eq!(
+            tail_preview("run_command", &value),
+            vec!["error[E0432]: 未解析的导入"]
+        );
         assert!(tail_preview("read_file", &value).is_empty());
 
-        let stdout = (1..=20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
-        let value = serde_json::json!({"stdout": stdout, "stderr": "", "success": true, "exit_code": 0});
+        let stdout = (1..=20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value =
+            serde_json::json!({"stdout": stdout, "stderr": "", "success": true, "exit_code": 0});
         let preview = tail_preview("run_command", &value);
         assert_eq!(preview.len(), PREVIEW_LINES + 1);
         assert!(preview[0].contains("省略 12 行"), "{preview:?}");
@@ -690,7 +730,10 @@ mod tests {
 
     #[test]
     fn home_is_shortened_like_pi() {
-        let Some(home) = env::var_os("HOME").map(std::path::PathBuf::from).filter(|p| !p.as_os_str().is_empty()) else {
+        let Some(home) = env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+        else {
             return; // 环境里没有 HOME 时无可折叠的前缀
         };
         assert_eq!(
@@ -704,7 +747,10 @@ mod tests {
         let (ui, buffer) = Ui::capture();
         let columns = terminal_width().saturating_sub(4).max(24);
         ui.step(3, 32, true);
-        ui.tool_call("run_command", &serde_json::json!({"command": "cargo clippy --all-targets 2>&1 | tail -20"}));
+        ui.tool_call(
+            "run_command",
+            &serde_json::json!({"command": "cargo clippy --all-targets 2>&1 | tail -20"}),
+        );
         let stderr = (0..14)
             .map(|n| format!("warning: 这是一条很长很长的中文编译错误说明第 {n} 行，需要换行"))
             .collect::<Vec<_>>()
@@ -714,11 +760,18 @@ mod tests {
             &Ok(serde_json::json!({"exit_code": 101, "success": false, "timed_out": false, "stdout": "", "stderr": stderr})),
             Duration::from_secs(3),
         );
-        ui.tool_result("write_file", &Err(anyhow::anyhow!("路径超出工作目录：../../etc/passwd")), Duration::from_millis(2));
+        ui.tool_result(
+            "write_file",
+            &Err(anyhow::anyhow!("路径超出工作目录：../../etc/passwd")),
+            Duration::from_millis(2),
+        );
         let out = buffer.borrow().clone();
         assert!(out.contains("省略 6 行"), "{out}");
         assert!(out.contains("退出码 101") && out.contains("3.0s"), "{out}");
-        assert!(out.contains("✗") && out.contains("路径超出工作目录"), "{out}");
+        assert!(
+            out.contains("✗") && out.contains("路径超出工作目录"),
+            "{out}"
+        );
         for line in out.lines() {
             let width = display_width(&strip_ansi(line));
             assert!(width <= columns, "超出终端宽度 {columns}：{width} {line}");
