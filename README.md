@@ -1,6 +1,6 @@
 # Rust Coding Agent：分阶段教程
 
-遵循 KISS 原则，每个阶段都保留可运行的版本。当前实现阶段 6：通过 OpenCode Go 的 Omen Alpha 调用只读工具查看项目。阶段 1 的完整源码保留在 `examples/stage1.rs`，可独立运行。
+遵循 KISS 原则，每个阶段都保留可运行的版本。当前版本在阶段 6 之后继续整理可用性：通过 OpenCode Go 的 Omen Alpha 查看与修改项目、执行验证命令，支持流式输出、请求中断和检查点恢复。各阶段快照保留在 `examples/`，可独立运行。
 
 ## 构建路线
 
@@ -246,9 +246,12 @@ cargo run -- --resume      # 恢复当前项目已保存的会话
 
 | 命令 | 行为 |
 | --- | --- |
+| `/help` | 显示命令清单 |
 | `/save` | 将当前会话保存到 `.rust-agent/session.json`，覆盖上次保存 |
 | `/load` | 用磁盘会话替换当前会话，失败则保留当前内容 |
-| `/status` | 显示模型、消息数量、历史 JSON 字节数和步数限制 |
+| `/recover` | 恢复自动检查点 `.rust-agent/checkpoint.json`（含中断时的半成品历史，见文末长程任务） |
+| `/continue` | 让模型核实磁盘和已有结果后继续未完成的目标 |
+| `/status` | 显示模型、工作目录、会话、存档路径、消息数量、工具调用次数、上下文大小和步数限制 |
 | `/clear` | 清空内存历史并生成新会话 ID，不删除已保存会话 |
 | `/exit` / Ctrl-D | 退出；需要保留进度时先 `/save` |
 
@@ -271,7 +274,7 @@ cargo run --example stage5
 cargo run
 ```
 
-本地验证：会话保存恢复、损坏文件、目录不匹配、工具结果配对，结合前面阶段的工具、循环、写入、命令超时与终端输入测试。阶段 3–6 的真实模型工具/修改闭环仍未完成整体验收；本地通过不代表外部服务验证完成。
+本地验证：会话保存恢复、损坏文件、目录不匹配、工具结果配对、流式分片重组与中断，结合前面阶段的工具、循环、写入、命令超时与终端输入测试。阶段 3–6 的真实模型工具/修改闭环仍未完成整体验收；本地通过不代表外部服务验证完成。
 
 
 ## 当前版本的模块结构
@@ -281,15 +284,59 @@ src/
 ├── main.rs       # 参数解析、初始化和顶层错误处理
 ├── chat.rs       # 终端输入、会话命令和历史管理
 ├── agent.rs      # 系统提示词、多步循环和工具结果回传
-├── model.rs      # HTTP 客户端、模型请求和响应解析
+├── model.rs      # HTTP 客户端、流式请求和响应解析
+├── tui.rs        # 终端渲染：列宽、进度行、流式输出与中断处理
 ├── auth.rs       # 本机 OpenCode Go 凭据读取
 ├── session.rs    # 会话文件保存、校验和恢复
 └── tools/        # 统一 Tool 接口和各个工具实现
 ```
 
-阅读顺序建议：`main.rs` → `chat.rs` → `agent.rs` → `model.rs` / `tools/`。单次任务由 main 直接调用 agent，交互任务由 chat 调用 agent；chat 使用 session 管理存档。模型响应测试放在 model，Agent 循环测试放在 agent。
+阅读顺序建议：`main.rs` → `chat.rs` → `agent.rs` → `model.rs` / `tui.rs` / `tools/`。单次任务由 main 直接调用 agent，交互任务由 chat 调用 agent；chat 使用 session 管理存档，也负责 `.rust-agent/history` 输入历史；tui 只处理显示与中断，不参与模型协议。模型响应测试放在 model，Agent 循环测试放在 agent，渲染测试放在 tui。
 
-前文阶段说明描述的是当时的布局；当前版本已按职责拆分，各阶段 `examples/` 保持原样以供对照。拆分没有新增依赖、异步运行时或行为变化。
+前文阶段说明描述的是当时的布局；当前版本已按职责拆分，各阶段 `examples/` 保持原样以供对照。拆分没有新增依赖或异步运行时；之后的提交在 `tui.rs` 加入流式渲染与请求中断，行为变化见下文两节。
+
+
+## 接入其他 OpenAI 兼容接口（可选）
+
+默认使用 OpenCode Go 的 `omen-alpha`。三个环境变量可以覆盖默认配置，用来接入其他兼容 `/chat/completions` 的服务（需要支持工具调用与 SSE 流式协议）：
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `RUST_AGENT_API_KEY` | API Key，优先于 auth.json | 读取本机 OpenCode 凭据 |
+| `RUST_AGENT_ENDPOINT` | 完整请求地址 | OpenCode Go 地址 |
+| `RUST_AGENT_MODEL` | 模型名 | `omen-alpha` |
+
+例如切换到本机的 MiMo Token Plan：
+
+```sh
+export RUST_AGENT_API_KEY="tp-…"
+export RUST_AGENT_ENDPOINT="https://token-plan-cn.xiaomimimo.com/v1/chat/completions"
+export RUST_AGENT_MODEL="mimo-v2.6-pro"
+cargo run
+```
+
+切换后启动横幅和 `/status` 会显示实际模型，提供商标注随之变为「自定义端点」；工具、确认流程和系统提示词保持不变。
+
+仓库根目录的 `run-mimo.sh` 把上面的流程封装成脚本：运行时从本机 mimocode 配置读取 key（也可先用 `RUST_AGENT_API_KEY` 覆盖），参数直接透传给 `cargo run`。在项目目录内使用：
+
+```sh
+./run-mimo.sh            # 交互模式
+./run-mimo.sh "问题"     # 单次问答
+./run-mimo.sh --resume   # 恢复会话
+```
+
+
+## 终端渲染与中断（当前版本）
+
+交互运行时（stderr 是终端）回答按 SSE 分片实时显示，等待期间显示转圈进度和已用时间；stderr 不是终端时（测试、管道或重定向运行）自动退化为非流式请求，行为与拆分前一致。
+
+工具活动可视化：每次调用显示工具名和参数（值按列宽截断），结果给出摘要（行数、匹配数、退出码或超时）和耗时，失败用 `✗` 标出；`run_command` 额外预览输出末尾最多 8 行（更长时带省略提示），编译错误一类的问题不必等模型转述。
+
+所有行按显示列计算宽度：CJK 字符占两列，超宽内容截断或换行；状态信息走 stderr，回答正文走 stdout，重定向时互不污染；非 TTY 或设置 `NO_COLOR` 时不输出颜色。
+
+Ctrl+C 在等待模型响应或执行命令时取消当前操作：已收到的流式内容保留，命令的整个进程组被终止；在输入提示符处按下则清空当前行，再按一次退出；连续三次信号可强制退出无响应的进程。
+
+输入历史保存在 `.rust-agent/history`（0600 权限），方向键可跨会话召回，文件最多保留 500 条；`/status` 显示历史条数、工具调用次数和上下文大小。
 
 
 ## 文件写入与长程任务（当前版本）
