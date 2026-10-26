@@ -1,9 +1,7 @@
 """macOS/Linux PTY regression: cargo build && python3 tests/terminal_input.py."""
 import errno
 import fcntl
-import json
 import os
-from pathlib import Path
 import pty
 import select
 import signal
@@ -14,13 +12,10 @@ import time
 
 
 def check(text, keys):
-    with tempfile.TemporaryDirectory() as directory:
-        auth = Path(directory) / "opencode/auth.json"
-        auth.parent.mkdir()
-        auth.write_text(json.dumps({"opencode-go": {"type": "api", "key": "test-only"}}))
+    with tempfile.TemporaryDirectory():
         pid, fd = pty.fork()
         if pid == 0:
-            os.environ["XDG_DATA_HOME"] = directory
+            os.environ["DEEPSEEK_API_KEY"] = "test-only"
             os.environ["TERM"] = "xterm-256color"
             os.execv("target/debug/rust-agent", ["rust-agent"])
         output = bytearray()

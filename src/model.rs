@@ -12,13 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DEFAULT_ENDPOINT: &str = "https://opencode.ai/zen/go/v1/chat/completions";
-const DEFAULT_MODEL: &str = "omen-alpha";
+const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
+const DEFAULT_MODEL: &str = "deepseek-flash";
 const MAX_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const TICK: Duration = Duration::from_millis(120);
 
-// 默认走 OpenCode Go；环境变量可切换到其他兼容接口，便于接入本地或其他服务。
+// 默认走 DeepSeek；环境变量可切换到其他兼容接口，便于接入本地或其他服务。
 fn env_string(key: &str) -> Option<String> {
     env::var(key)
         .ok()
@@ -36,6 +36,24 @@ pub(crate) fn model() -> String {
 
 pub(crate) fn custom_endpoint() -> bool {
     env_string("RUST_AGENT_ENDPOINT").is_some()
+}
+
+/// 当前对接的服务名，用于提示与状态展示。
+pub(crate) fn provider_name() -> &'static str {
+    if custom_endpoint() {
+        "自定义端点"
+    } else {
+        "DeepSeek"
+    }
+}
+
+/// 思考模式默认关闭：工具调用循环要的是稳定、可预期的回答正文。
+/// 需要推理时用 RUST_AGENT_THINKING=enabled 打开。
+fn thinking_enabled() -> bool {
+    matches!(
+        env_string("RUST_AGENT_THINKING").as_deref(),
+        Some("enabled") | Some("on") | Some("1") | Some("true")
+    )
 }
 
 pub(crate) fn create_client() -> Result<Client> {
@@ -196,13 +214,20 @@ fn payload(messages: &[Value], allow_tools: bool, stream: bool) -> Result<Vec<u8
     if !allow_tools {
         request_messages.push(json!({"role":"user","content":"本轮工具执行已结束。请立即根据现有工具结果，用中文给出最终回答，不再调用工具。资料不足或工具失败时，请说明已确认的事实及缺少的信息。"}));
     }
-    let bytes = serde_json::to_vec(&json!({
+    let mut body = json!({
         "model": model(),
         "messages": request_messages,
         "tools": tools::definitions(),
         "tool_choice": if allow_tools { "auto" } else { "none" },
         "stream": stream
-    }))?;
+    });
+    // thinking 是 DeepSeek 扩展字段；切到其他兼容服务时不发送，避免请求被拒。
+    if !custom_endpoint() {
+        body["thinking"] = json!({
+            "type": if thinking_enabled() { "enabled" } else { "disabled" }
+        });
+    }
+    let bytes = serde_json::to_vec(&body)?;
     if bytes.len() > MAX_REQUEST_BYTES {
         bail!("请求超过 512 KiB，未发送。请 /save 后 /clear，或缩小工具读取范围");
     }
@@ -219,7 +244,7 @@ fn post(
     let response = client
         .post(endpoint)
         .bearer_auth(api_key)
-        .header("x-opencode-session", session)
+        .header("x-session-id", session)
         .header("content-type", "application/json")
         .body(body.to_vec())
         .send()
@@ -227,12 +252,12 @@ fn post(
     let status = response.status();
     if !status.is_success() {
         let hint = match status.as_u16() {
-            401 | 403 => "请检查 API Key、Go 订阅和模型访问权限",
-            429 => "请求受限，请检查 Go 可用额度或稍后重试",
+            401 | 403 => "请检查 API Key、账户余额和模型访问权限",
+            429 => "请求受限，请检查账户额度或稍后重试",
             500..=599 => "模型服务暂时异常，请稍后重试",
             _ => "请检查接口参数和模型可用性",
         };
-        bail!("OpenCode Go 返回 HTTP {status}：{hint}");
+        bail!("{} 返回 HTTP {status}：{hint}", provider_name());
     }
     Ok(response)
 }

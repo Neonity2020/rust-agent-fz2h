@@ -38,7 +38,7 @@ fn run(ui: &tui::Ui) -> Result<()> {
     let prompt = args.join(" ");
     if prompt == "--help" || prompt == "-h" {
         println!(
-            "多轮对话：cargo run\n单次问答：cargo run -- \"你的问题\"\n阶段 1：cargo run --example stage1 -- \"你的问题\"\n恢复：cargo run -- --resume\n长任务：cargo run -- --max-steps 64\n对话内输入 /help 查看命令；Ctrl+C 取消当前请求。\n凭据默认读本机 OpenCode auth.json；可用 RUST_AGENT_API_KEY、RUST_AGENT_ENDPOINT、RUST_AGENT_MODEL 覆盖。"
+            "多轮对话：cargo run\n单次问答：cargo run -- \"你的问题\"\n阶段 1：cargo run --example stage1 -- \"你的问题\"\n恢复：cargo run -- --resume\n长任务：cargo run -- --max-steps 64\n对话内输入 /help 查看命令；Ctrl+C 取消当前请求。\n凭据默认读环境变量 DEEPSEEK_API_KEY；可用 RUST_AGENT_API_KEY、RUST_AGENT_ENDPOINT、RUST_AGENT_MODEL、RUST_AGENT_THINKING 覆盖。"
         );
         return Ok(());
     }

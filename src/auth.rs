@@ -1,32 +1,20 @@
-use anyhow::{Context, Result, bail};
-use serde_json::Value;
+use anyhow::{Result, bail};
 use std::env;
 
+/// 读取 API Key：先看通用覆盖变量，再看 DeepSeek 官方变量。
+/// 凭据只从环境读取，程序不落盘、不打印密钥。
 pub(crate) fn load_api_key() -> Result<String> {
-    if let Some(key) = env::var("RUST_AGENT_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(key);
+    for name in ["RUST_AGENT_API_KEY", "DEEPSEEK_API_KEY"] {
+        if let Some(value) = env::var(name)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value);
+        }
     }
-    let data_dir = match env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-        Some(path) => std::path::PathBuf::from(path),
-        None => std::path::PathBuf::from(env::var_os("HOME").context("无法确定用户主目录")?)
-            .join(".local/share"),
-    };
-    let path = data_dir.join("opencode/auth.json");
-    let contents = std::fs::read_to_string(&path)
-        .with_context(|| format!("无法读取 {}，请先在 OpenCode 中登录 Go", path.display()))?;
-    let auth: Value = serde_json::from_str(&contents).context("OpenCode auth.json 格式无效")?;
-    let go = &auth["opencode-go"];
-    if go["type"].as_str() != Some("api") {
-        bail!("auth.json 缺少 Go API 凭据，请先在 OpenCode 中连接 OpenCode Go");
-    }
-    let key = go["key"]
-        .as_str()
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .context("auth.json 中的 Go API Key 缺失或为空")?;
-    Ok(key.to_owned())
+    bail!(
+        "未找到 API Key：请设置环境变量 DEEPSEEK_API_KEY（或 RUST_AGENT_API_KEY），\
+         密钥可在 https://platform.deepseek.com/api_keys 申请"
+    );
 }

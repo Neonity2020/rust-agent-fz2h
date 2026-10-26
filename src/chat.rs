@@ -113,11 +113,7 @@ fn status_report(
         .flatten()
         .count();
     let row = |label: &str, value: String| format!("  {}  {}", pad(label, 8), value);
-    let provider = if model::custom_endpoint() {
-        "自定义端点"
-    } else {
-        "OpenCode Go"
-    };
+    let provider = model::provider_name();
     Ok(vec![
         row("模型", format!("{}（{provider}）", model::model())),
         row("工作目录", shorten_home(root)),
@@ -301,7 +297,7 @@ mod tests {
         )?;
         let text = lines.join("\n");
         assert!(text.contains("2 次工具调用"), "{text}");
-        assert!(text.contains("omen-alpha"));
+        assert!(text.contains("deepseek-flash"));
         assert!(text.contains("每轮最多 32 步"));
         assert!(text.contains("5 条"), "{text}");
         Ok(())

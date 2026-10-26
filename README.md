@@ -1,6 +1,6 @@
 # Rust Coding Agent：分阶段教程
 
-遵循 KISS 原则，每个阶段都保留可运行的版本。当前版本在阶段 6 之后继续整理可用性：通过 OpenCode Go 的 Omen Alpha 查看与修改项目、执行验证命令，支持流式输出、请求中断和检查点恢复。各阶段快照保留在 `examples/`，可独立运行。
+遵循 KISS 原则，每个阶段都保留可运行的版本。当前版本在阶段 6 之后继续整理可用性：通过 DeepSeek 查看与修改项目、执行验证命令，支持流式输出、请求中断和检查点恢复。各阶段快照保留在 `examples/`，可独立运行。
 
 ## 构建路线
 
@@ -15,15 +15,21 @@
 
 ## 阶段 1：运行
 
-需要 Rust 工具链，并且已在本机 OpenCode 中连接 Go 订阅。本项目使用 Rust 2024 edition，当前验证环境为 Rust 1.98.0；依赖版本由 `Cargo.lock` 固定。
+需要 Rust 工具链，并且有一个 DeepSeek API Key。本项目使用 Rust 2024 edition，当前验证环境为 Rust 1.98.0；依赖版本由 `Cargo.lock` 固定。
 
-直接运行，无需配置 API Key 环境变量：
+先设置密钥（在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 申请）：
+
+```zsh
+export DEEPSEEK_API_KEY="sk-…"
+```
+
+然后直接运行：
 
 ```zsh
 cargo run --example stage1 -- "用一个简短例子解释 Rust 的所有权"
 ```
 
-程序自动读取 `~/.local/share/opencode/auth.json` 中 `opencode-go` 的 API 凭据。如果本机已有 `XDG_DATA_HOME` 设置，则读取该目录下的 `opencode/auth.json`。程序不会修改凭据文件，也不会打印或复制密钥到项目。凭据存储位置参见 [OpenCode CLI 文档](https://dev.opencode.ai/docs/cli/)。
+程序只从环境变量读取密钥（`DEEPSEEK_API_KEY` 或 `RUST_AGENT_API_KEY`），不读写任何凭据文件，也不会打印或复制密钥到项目。
 
 回答输出到 stdout，进度和错误输出到 stderr。每次运行都是独立请求。
 
@@ -38,9 +44,9 @@ cargo clippy -- -D warnings
 从 `examples/stage1.rs` 的 `run()` 按顺序阅读：
 
 1. 读取命令行问题，拒绝空输入。
-2. 调用 `load_api_key()` 读取本机 OpenCode Go 凭据，检查认证类型和密钥是否有效。
+2. 调用 `load_api_key()` 读取环境变量中的 API Key，检查密钥是否存在且非空。
 3. 创建 `reqwest::blocking::Client`，设置连接和请求超时。
-4. 发送带 Bearer 认证的 JSON 请求，并携带客户端名称及 `x-opencode-session` 会话标识。
+4. 发送带 Bearer 认证的 JSON 请求，并携带客户端名称及 `x-session-id` 会话标识。
 5. 检查 HTTP 状态，从 `choices[0].message.content` 取出回答并打印。
 
 阶段 1 使用三个依赖：`reqwest` 负责同步 HTTP 和 TLS，`serde_json` 构造与读取 JSON，`anyhow` 给失败步骤补充可读的错误信息。应用代码没有异步运行时配置、流式输出或框架抽象。
@@ -48,19 +54,19 @@ cargo clippy -- -D warnings
 请求固定使用：
 
 ```text
-POST https://opencode.ai/zen/go/v1/chat/completions
-model: omen-alpha
+POST https://api.deepseek.com/chat/completions
+model: deepseek-flash
 ```
 
-`opencode-go/omen-alpha` 是 OpenCode 配置中的带提供商前缀名称；直接调用 API 时使用 `omen-alpha`。接入信息及请求头要求见 [OpenCode Go 官方文档](https://opencode.ai/docs/go/)（核对日期：2026-09-05）。
+`deepseek-flash` 由 DeepSeek-V4.1-Flash-1017 提供；旧名 `deepseek-chat`、`deepseek-reasoner` 已于 2026-07-24 下线。另有 `deepseek-v4-pro` 可通过 `RUST_AGENT_MODEL` 切换。接口信息见 [DeepSeek API 文档](https://api-docs.deepseek.com/)（核对日期：2026-10-26）。
 
 ## 阶段 1：验收与边界
 
-- 正常：本机已连接 Go 订阅，直接提问，终端出现模型回答，退出码为 0。
-- 输入错误：没有问题、凭据文件无法读取、JSON 无效或 Go 凭据缺失时，程序在请求前报错，退出码为 1。
+- 正常：已设置有效 `DEEPSEEK_API_KEY`，直接提问，终端出现模型回答，退出码为 0。
+- 输入错误：没有问题或 API Key 缺失时，程序在请求前报错，退出码为 1。
 - 请求错误：显示网络错误或 HTTP 状态；不会自动重试。
 
-真实模型回答需要在有效 Go 订阅与网络下验证，编译成功不等于远程接口调用成功。阶段 1 没有多轮记忆、代码读取、文件修改或工具调用。
+真实模型回答需要有效的 API Key 与网络，编译成功不等于远程接口调用成功。阶段 1 没有多轮记忆、代码读取、文件修改或工具调用。
 
 
 ## 阶段 2：运行多轮对话
@@ -69,7 +75,7 @@ model: omen-alpha
 cargo run
 ```
 
-沿用本机 OpenCode Go 凭据，不需要新增配置。阶段 2 使用 `rustyline` 管理输入编辑和终端重绘，处理中文退格及光标移动。每行输入作为一个问题；等待回答后再输入下一行。
+沿用同一个 `DEEPSEEK_API_KEY`，不需要新增配置。阶段 2 使用 `rustyline` 管理输入编辑和终端重绘，处理中文退格及光标移动。每行输入作为一个问题；等待回答后再输入下一行。
 
 可以按下面的顺序验证（模型的具体措辞可能不同）：
 
@@ -113,7 +119,7 @@ system → user（第一问）→ assistant（第一答）→ user（第二问�
 
 ## 阶段 2：验收与边界
 
-已使用本机 Go 凭据完成真实三轮验证：先告知项目代号“蓝鲸742”，第二轮模型正确复述，清空后再问回答“不知道”。空行、清空、退出与 EOF 也已通过本地检查。
+已使用 DeepSeek 完成真实三轮验证：先告知项目代号“蓝鲸742”，第二轮模型正确复述，清空后再问回答“不知道”。空行、清空、退出与 EOF 也已通过本地检查。
 
 - 第二轮能回答第一轮提供的项目名称。
 - `/clear` 后，后续请求不再携带之前的问答。
@@ -159,7 +165,7 @@ cargo run -- "请列出当前目录，并搜索 src 中包含 load_api_key 的�
 
 所有工具路径先解析为真实路径，再检查是否位于工作目录内，拒绝 `..` 和指向目录外的符号链接。搜索不跟随遇到的符号链接，跳过隐藏项、`target`、`node_modules`；最多检查 2000 项、返回 50 条匹配，每条最多 300 字符，跳过不可读、过大或非文本文件。截断标识和跳过数量用于说明结果不一定完整。此路径检查不是用于防御其他进程同时替换文件的操作系统沙箱。
 
-工具读取的内容会发送到 OpenCode Go。请在准备让模型查看的项目目录中运行；当前只读工具不提供文件修改或命令执行。
+工具读取的内容会发送到 DeepSeek。请在准备让模型查看的项目目录中运行；当前只读工具不提供文件修改或命令执行。
 
 验证命令：
 
@@ -210,7 +216,7 @@ cargo run -- "先查看项目目录，再找到程序入口，阅读相关文件
 
 工具错误回传给模型，允许下一步换路径或调整参数；网络、响应解析错误会终止本轮，交互模式撤回本轮历史。没有自动网络重试，也不会无限循环。阶段 5 才加入修改与执行命令。
 
-本地验收覆盖：连续工具调用、工具失败后读取正确文件、结果 ID 对应、预留最后总结步骤、模型不遵守上限时停止；此前响应解析、路径边界和中文输入测试继续保留。真实 Omen Alpha 多步验收尚未完成，不能将模拟测试视为真实服务验证。
+本地验收覆盖：连续工具调用、工具失败后读取正确文件、结果 ID 对应、预留最后总结步骤、模型不遵守上限时停止；此前响应解析、路径边界和中文输入测试继续保留。真实 DeepSeek 多步验收尚未完成，不能将模拟测试视为真实服务验证。
 
 
 ## 阶段 5：修改、验证与修复
@@ -286,7 +292,7 @@ src/
 ├── agent.rs      # 系统提示词、多步循环和工具结果回传
 ├── model.rs      # HTTP 客户端、流式请求和响应解析
 ├── tui.rs        # 终端渲染：列宽、进度行、流式输出与中断处理
-├── auth.rs       # 本机 OpenCode Go 凭据读取
+├── auth.rs       # API Key 环境变量读取
 ├── session.rs    # 会话文件保存、校验和恢复
 └── tools/        # 统一 Tool 接口和各个工具实现
 ```
@@ -298,13 +304,19 @@ src/
 
 ## 接入其他 OpenAI 兼容接口（可选）
 
-默认使用 OpenCode Go 的 `omen-alpha`。三个环境变量可以覆盖默认配置，用来接入其他兼容 `/chat/completions` 的服务（需要支持工具调用与 SSE 流式协议）：
+默认使用 DeepSeek 的 `deepseek-flash`。五个环境变量可以覆盖默认配置，用来接入其他兼容 `/chat/completions` 的服务（需要支持工具调用与 SSE 流式协议）：
 
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
-| `RUST_AGENT_API_KEY` | API Key，优先于 auth.json | 读取本机 OpenCode 凭据 |
-| `RUST_AGENT_ENDPOINT` | 完整请求地址 | OpenCode Go 地址 |
-| `RUST_AGENT_MODEL` | 模型名 | `omen-alpha` |
+| `DEEPSEEK_API_KEY` | API Key | 无，缺失则报错退出 |
+| `RUST_AGENT_API_KEY` | API Key，优先于 `DEEPSEEK_API_KEY` | 无 |
+| `RUST_AGENT_ENDPOINT` | 完整请求地址 | `https://api.deepseek.com/chat/completions` |
+| `RUST_AGENT_MODEL` | 模型名 | `deepseek-flash` |
+| `RUST_AGENT_THINKING` | 思考模式，`enabled` 打开 | `disabled` |
+
+DeepSeek 的 `thinking` 默认为开启，这里显式关闭：工具调用循环需要的是稳定、可预期的回答正文。需要长推理时再打开，代价是更多输出 token 与更长延迟。
+
+> `thinking` 是 DeepSeek 的扩展字段，只在走默认 DeepSeek 端点时发送；切到其他兼容服务时不带该参数，避免请求被拒。
 
 例如切换到本机的 MiMo Token Plan：
 
